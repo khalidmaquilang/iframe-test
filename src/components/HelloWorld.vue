@@ -32,6 +32,7 @@
 
             <input
                 v-model="sandboxTokens"
+                type="text"
                 :disabled="!useSandbox"
                 class="mono"
                 placeholder="allow-scripts allow-same-origin"
@@ -40,23 +41,38 @@
             <button @click="reloadFrame">Apply &amp; reload</button>
         </div>
 
-        <!-- Row 3: viewport + probes -->
+        <!-- Row 3: viewport size -->
         <div class="toolbar toolbar--alt">
-            <span class="label">frame width</span>
+            <span class="label">width</span>
             <button
                 v-for="w in widths"
-                :key="w.label"
+                :key="'w' + w.label"
                 :class="{ active: frameWidth === w.value }"
                 @click="frameWidth = w.value"
             >{{ w.label }}</button>
 
-            <span class="spacer" />
+            <span class="divider" />
 
+            <span class="label">height</span>
+            <button
+                v-for="h in heights"
+                :key="'h' + h.label"
+                :class="{ active: frameHeight === h.value }"
+                @click="frameHeight = h.value"
+            >{{ h.label }}</button>
+
+            <label class="check">
+                <input type="checkbox" v-model="allowScroll" /> allow scrolling
+            </label>
+        </div>
+
+        <!-- Row 4: probes -->
+        <div class="toolbar toolbar--alt">
             <button @click="probeFrame">Probe frame</button>
             <button @click="triggerGCash" :disabled="!handshake">
                 postMessage open_gcash
             </button>
-            <span class="note">(expected to fail — no user activation)</span>
+            <span class="note">expected to fail — user activation does not cross the frame</span>
         </div>
 
         <!-- Probe results -->
@@ -98,15 +114,13 @@
                 Enter a URL above and click Load
             </div>
 
-            <div
-                v-if="activeUrl"
-                class="frame-shell"
-                :style="frameWidth ? { width: frameWidth + 'px' } : { width: '100%' }"
-            >
+            <div v-if="activeUrl" class="frame-shell" :style="shellStyle">
                 <div class="frame-meta">
-                    {{ frameWidth ? frameWidth + 'px' : 'full width' }}
+                    {{ frameWidth ? frameWidth + 'px' : 'full' }} ×
+                    {{ frameHeight ? frameHeight + 'px' : 'fill' }}
                     <template v-if="useSandbox"> · sandbox="{{ sandboxTokens }}"</template>
                     <template v-else> · no sandbox</template>
+                    <template v-if="!allowScroll"> · scrolling=no</template>
                 </div>
 
                 <iframe
@@ -114,8 +128,8 @@
                     ref="iframeRef"
                     :src="activeUrl"
                     :sandbox="useSandbox ? sandboxTokens : undefined"
+                    :scrolling="allowScroll ? 'auto' : 'no'"
                     class="frame"
-                    scrolling="no"
                     @load="onLoad"
                 />
             </div>
@@ -124,7 +138,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 
 const iframeRef = ref(null)
 const url       = ref('')
@@ -174,21 +188,39 @@ function applyPreset() {
     const p = presets[presetKey.value]
     useSandbox.value    = p.sandbox
     sandboxTokens.value = p.tokens
-    addLog('out', `preset → ${p.name}`)
+    addLog('sys', `preset → ${p.name}`)
     if (activeUrl.value) reloadFrame()
 }
 
 /* ------------------------------------------------------------------ *
- * Viewport width (reproduces the CSS media-query trap)
+ * Viewport size
+ * width 400 reproduces the @media (max-width:1024px) trap: a desktop
+ * user in a narrow merchant sidebar loses the QR instructions
  * ------------------------------------------------------------------ */
 const widths = [
-    { label: 'full',   value: null },
-    { label: '360',    value: 360  },
-    { label: '400',    value: 400  },
-    { label: '768',    value: 768  },
-    { label: '1024',   value: 1024 },
+    { label: 'full', value: null },
+    { label: '360',  value: 360  },
+    { label: '400',  value: 400  },
+    { label: '768',  value: 768  },
+    { label: '1024', value: 1024 },
 ]
-const frameWidth = ref(null)
+
+const heights = [
+    { label: 'fill', value: null },
+    { label: '500',  value: 500  },
+    { label: '640',  value: 640  },
+    { label: '800',  value: 800  },
+    { label: '1000', value: 1000 },
+]
+
+const frameWidth  = ref(null)
+const frameHeight = ref(null)
+const allowScroll = ref(true)
+
+const shellStyle = computed(() => ({
+    width:  frameWidth.value  ? frameWidth.value  + 'px' : '100%',
+    height: frameHeight.value ? frameHeight.value + 'px' : '100%',
+}))
 
 /* ------------------------------------------------------------------ *
  * Frame lifecycle
@@ -197,14 +229,14 @@ function loadUrl() {
     if (!url.value.trim()) return
     activeUrl.value = url.value.trim()
     reloadFrame()
-    addLog('out', `src = ${activeUrl.value}`)
+    addLog('sys', `src = ${activeUrl.value}`)
 }
 
 function reloadFrame() {
     loaded.value    = false
     handshake.value = false
     probe.value     = null
-    frameKey.value++ // force Vue to recreate the element so sandbox re-applies
+    frameKey.value++ // recreate the element so sandbox re-applies
 }
 
 function onLoad() {
@@ -213,19 +245,19 @@ function onLoad() {
 }
 
 /* ------------------------------------------------------------------ *
- * Probe: what can the framed page actually do?
- * Run from the parent side; mirrors what the cashier page should
- * self-report via sendBeacon in production.
+ * Probe
  * ------------------------------------------------------------------ */
 function probeFrame() {
-    const el = iframeRef.value
+    const el   = iframeRef.value
+    const rect = el ? el.getBoundingClientRect() : { width: 0, height: 0 }
+
     const result = {
         sandbox_attr: useSandbox.value ? sandboxTokens.value : '(none)',
-        frame_width: el ? el.getBoundingClientRect().width : 0,
+        frame_w: Math.round(rect.width),
+        frame_h: Math.round(rect.height),
     }
 
-    // Can the parent reach into the frame? Cross-origin will throw —
-    // that's expected and not a failure.
+    // Cross-origin will throw — expected, not a failure
     try {
         void el.contentWindow.location.href
         result.parent_can_read_frame = true
@@ -260,7 +292,7 @@ function onMessage(e) {
 
     addLog('in', typeof e.data === 'string' ? e.data : JSON.stringify(e.data), e.origin)
 
-    if (e.data?.type === 'gcash_ready')   handshake.value = true
+    if (e.data?.type === 'gcash_ready') handshake.value = true
     if (e.data?.type === 'deeplink_result') {
         probe.value = { ...(probe.value || {}), ...e.data.payload }
     }
@@ -293,16 +325,18 @@ onUnmounted(() => window.removeEventListener('message', onMessage))
     display: flex;
     flex-direction: column;
     height: 100vh;
+    overflow: hidden;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-size: 13px;
     background: #f5f5f5;
 }
 
+/* ---- toolbars ---- */
 .toolbar {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 10px 14px;
+    padding: 8px 14px;
     background: #fff;
     border-bottom: 1px solid #e0e0e0;
     flex-shrink: 0;
@@ -323,13 +357,17 @@ onUnmounted(() => window.removeEventListener('message', onMessage))
     white-space: nowrap;
 }
 
-.spacer { flex: 1; }
+.divider {
+    width: 1px;
+    height: 20px;
+    background: #ddd;
+    margin: 0 4px;
+}
 
-.toolbar input[type="text"],
-.toolbar input:not([type]) {
+.toolbar input[type="text"] {
     flex: 1;
-    min-width: 200px;
-    height: 34px;
+    min-width: 180px;
+    height: 32px;
     padding: 0 10px;
     border: 1px solid #d0d0d0;
     border-radius: 6px;
@@ -338,11 +376,11 @@ onUnmounted(() => window.removeEventListener('message', onMessage))
 }
 
 .toolbar input.mono { font-family: monospace; font-size: 12px; }
-.toolbar input:focus { border-color: #204FC9; }
-.toolbar input:disabled { background: #f0f0f0; color: #aaa; }
+.toolbar input[type="text"]:focus { border-color: #204FC9; }
+.toolbar input[type="text"]:disabled { background: #f0f0f0; color: #aaa; }
 
 .toolbar select {
-    height: 34px;
+    height: 32px;
     padding: 0 8px;
     border: 1px solid #d0d0d0;
     border-radius: 6px;
@@ -363,8 +401,8 @@ onUnmounted(() => window.removeEventListener('message', onMessage))
 .check input { cursor: pointer; }
 
 .toolbar button {
-    height: 34px;
-    padding: 0 14px;
+    height: 32px;
+    padding: 0 12px;
     border: 1px solid #d0d0d0;
     border-radius: 6px;
     background: #fff;
@@ -390,6 +428,7 @@ onUnmounted(() => window.removeEventListener('message', onMessage))
 .badge--ok   { background: #dcfce7; color: #166534; }
 .badge--wait { background: #fef9c3; color: #854d0e; }
 
+/* ---- probe ---- */
 .probe {
     display: flex;
     align-items: center;
@@ -421,13 +460,14 @@ onUnmounted(() => window.removeEventListener('message', onMessage))
 .chip--yes { background: #dcfce7; color: #166534; }
 .chip--no  { background: #fee2e2; color: #991b1b; }
 
+/* ---- log ---- */
 .log-bar {
     display: flex;
     flex-direction: column;
-    padding: 8px 14px;
+    padding: 6px 14px 8px;
     background: #1e1e1e;
     color: #ccc;
-    max-height: 160px;
+    height: 110px;
     flex-shrink: 0;
 }
 
@@ -436,6 +476,7 @@ onUnmounted(() => window.removeEventListener('message', onMessage))
     justify-content: space-between;
     align-items: center;
     margin-bottom: 4px;
+    flex-shrink: 0;
 }
 
 .log-title {
@@ -455,6 +496,7 @@ onUnmounted(() => window.removeEventListener('message', onMessage))
     gap: 2px;
     overflow-y: auto;
     flex: 1;
+    min-height: 0;
 }
 
 .log-empty { color: #555; font-style: italic; font-size: 12px; }
@@ -476,14 +518,21 @@ onUnmounted(() => window.removeEventListener('message', onMessage))
 .log-dir    { color: #888; font-size: 11px; white-space: nowrap; }
 .log-origin { color: #a78bfa; font-size: 11px; white-space: nowrap; }
 
+/* ---- frame area ----
+ * min-height:0 is what makes overflow:auto actually engage.
+ * Flex items default to min-height:auto and refuse to shrink below
+ * content size, which is what killed the scrollbar.
+ */
 .frame-wrapper {
     flex: 1;
-    position: relative;
+    min-height: 0;
     overflow: auto;
     display: flex;
     justify-content: center;
+    align-items: flex-start;
     background: #e8e8e8;
     padding: 12px;
+    position: relative;
 }
 
 .placeholder {
@@ -499,9 +548,10 @@ onUnmounted(() => window.removeEventListener('message', onMessage))
 .frame-shell {
     display: flex;
     flex-direction: column;
+    flex-shrink: 0;
+    min-height: 400px;
     background: #fff;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
-    overflow: hidden;
 }
 
 .frame-meta {
@@ -513,10 +563,12 @@ onUnmounted(() => window.removeEventListener('message', onMessage))
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    flex-shrink: 0;
 }
 
 .frame {
     flex: 1;
+    min-height: 0;
     width: 100%;
     border: none;
     display: block;
